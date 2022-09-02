@@ -1,4 +1,4 @@
-module github.com/rangow/gmsm
+module github.com/rangoW/gmsm
 
 go 1.14
 
