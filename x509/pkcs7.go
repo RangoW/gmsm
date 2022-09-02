@@ -19,7 +19,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/tjfoc/gmsm/sm2"
+	"github.com/rangoW/gmsm/sm2"
+	"github.com/rangoW/gmsm/sm3"
 )
 
 // PKCS7 Represents a PKCS7 structure
@@ -577,28 +578,59 @@ type SignerInfoConfig struct {
 	ExtraSignedAttributes []Attribute
 }
 
+type DigestOpts struct {
+	Skip bool
+	Oid  asn1.ObjectIdentifier
+}
+
 // NewSignedData initializes a SignedData with content
-func NewSignedData(data []byte) (*SignedData, error) {
-	content, err := asn1.Marshal(data)
-	if err != nil {
-		return nil, err
+func NewSignedData(data []byte, originalText bool, opts *DigestOpts) (*SignedData, error) {
+	var (
+		err           error
+		messageDigest []byte
+		ci            = contentInfo{ContentType: oidData}
+
+		hashFunc = sm3.New()
+	)
+
+	if opts != nil {
+		if oidHashSM3.Equal(opts.Oid) {
+			hashFunc = sm3.New()
+		} else if opts.Oid.Equal(oidSHA256) {
+			hashFunc = crypto.SHA256.New()
+		} else {
+			return nil, ErrPKCS7UnsupportedAlgorithm
+		}
+
+		if opts.Skip && len(data) == hashFunc.Size() {
+			hashFunc = nil
+			messageDigest = data
+		}
 	}
-	ci := contentInfo{
-		ContentType: oidData,
-		Content:     asn1.RawValue{Class: 2, Tag: 0, Bytes: content, IsCompound: true},
+
+	if hashFunc != nil {
+		hashFunc.Write(data)
+		messageDigest = hashFunc.Sum(nil)
 	}
+
+	if originalText {
+		content, err = asn1.Marshal(data)
+		if err != nil {
+			return nil, err
+		}
+		ci.C
+	}
+
 	digAlg := pkix.AlgorithmIdentifier{
 		Algorithm: oidDigestAlgorithmSHA1,
 	}
-	h := crypto.SHA1.New()
-	h.Write(data)
-	md := h.Sum(nil)
+
 	sd := signedData{
 		ContentInfo:                ci,
 		Version:                    1,
 		DigestAlgorithmIdentifiers: []pkix.AlgorithmIdentifier{digAlg},
 	}
-	return &SignedData{sd: sd, messageDigest: md}, nil
+	return &SignedData{sd: sd, messageDigest: messageDigest}, nil
 }
 
 type attributes struct {
@@ -997,8 +1029,6 @@ func encryptKey(key []byte, recipient *Certificate) ([]byte, error) {
 	return nil, ErrPKCS7UnsupportedAlgorithm
 }
 
-
-
 func PKCS7EncryptSM2(content []byte, recipients []*Certificate, mode int) ([]byte, error) {
 	var eci *encryptedContentInfo
 	var key []byte
@@ -1061,7 +1091,6 @@ func PKCS7EncryptSM2(content []byte, recipients []*Certificate, mode int) ([]byt
 
 	return asn1.Marshal(wrapper)
 }
-
 
 func encryptKeySM2(key []byte, recipient *Certificate, mode int) ([]byte, error) {
 	if pub := recipient.PublicKey.(*ecdsa.PublicKey); pub != nil {
