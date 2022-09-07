@@ -41,9 +41,7 @@ import (
 	"time"
 
 	"github.com/rangoW/gmsm/sm2"
-
 	"github.com/rangoW/gmsm/sm3"
-	"golang.org/x/crypto/ripemd160"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -209,7 +207,6 @@ func init() {
 	RegisterHash(SHA384, sha512.New384)
 	RegisterHash(SHA512, sha512.New)
 	RegisterHash(MD5SHA1, nil)
-	RegisterHash(RIPEMD160, ripemd160.New)
 	RegisterHash(SHA3_224, sha3.New224)
 	RegisterHash(SHA3_256, sha3.New256)
 	RegisterHash(SHA3_384, sha3.New384)
@@ -233,7 +230,6 @@ const (
 	SHA384                     // import crypto/sha512
 	SHA512                     // import crypto/sha512
 	MD5SHA1                    // no implementation; MD5+SHA1 used for TLS RSA
-	RIPEMD160                  // import golang.org/x/crypto/ripemd160
 	SHA3_224                   // import golang.org/x/crypto/sha3
 	SHA3_256                   // import golang.org/x/crypto/sha3
 	SHA3_384                   // import golang.org/x/crypto/sha3
@@ -259,7 +255,6 @@ var digestSizes = []uint8{
 	SHA3_384:   48,
 	SHA3_512:   64,
 	MD5SHA1:    36,
-	RIPEMD160:  20,
 	SM3:        32,
 }
 

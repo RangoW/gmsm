@@ -15,6 +15,7 @@ import (
 	"encoding/asn1"
 	"errors"
 	"fmt"
+	"hash"
 	"math/big"
 	"sort"
 	"time"
@@ -564,6 +565,8 @@ type SignedData struct {
 	sd            signedData
 	certs         []*Certificate
 	messageDigest []byte
+	digestAlgo    asn1.ObjectIdentifier
+	signAlgo      asn1.ObjectIdentifier
 }
 
 // Attribute represents a key value pair attribute. Value must be marshalable byte
@@ -576,6 +579,7 @@ type Attribute struct {
 // SignerInfoConfig are optional values to include when adding a signer
 type SignerInfoConfig struct {
 	ExtraSignedAttributes []Attribute
+	HashFunc              hash.Hash
 }
 
 type DigestOpts struct {
@@ -584,20 +588,23 @@ type DigestOpts struct {
 }
 
 // NewSignedData initializes a SignedData with content
-func NewSignedData(data []byte, originalText bool, opts *DigestOpts) (*SignedData, error) {
+func NewSignedData(data []byte, opts *DigestOpts) (*SignedData, error) {
 	var (
-		err           error
 		messageDigest []byte
-		ci            = contentInfo{ContentType: oidData}
 
+		hashOID  = oidHashSM3
+		signOID  = oidSignatureSM2WithSM3
 		hashFunc = sm3.New()
 	)
 
 	if opts != nil {
+		hashOID = opts.Oid
 		if oidHashSM3.Equal(opts.Oid) {
 			hashFunc = sm3.New()
+
 		} else if opts.Oid.Equal(oidSHA256) {
 			hashFunc = crypto.SHA256.New()
+			signOID = oidSignatureSHA256WithRSA
 		} else {
 			return nil, ErrPKCS7UnsupportedAlgorithm
 		}
@@ -613,24 +620,24 @@ func NewSignedData(data []byte, originalText bool, opts *DigestOpts) (*SignedDat
 		messageDigest = hashFunc.Sum(nil)
 	}
 
-	if originalText {
-		content, err = asn1.Marshal(data)
-		if err != nil {
-			return nil, err
-		}
-		ci.C
+	content, err := asn1.Marshal(data)
+	if err != nil {
+		return nil, err
 	}
 
+	ci := contentInfo{ContentType: oidData}
+	ci.Content = asn1.RawValue{Class: 2, Tag: 0, Bytes: content, IsCompound: true}
+
 	digAlg := pkix.AlgorithmIdentifier{
-		Algorithm: oidDigestAlgorithmSHA1,
+		Algorithm: hashOID,
 	}
 
 	sd := signedData{
-		ContentInfo:                ci,
 		Version:                    1,
 		DigestAlgorithmIdentifiers: []pkix.AlgorithmIdentifier{digAlg},
+		ContentInfo:                ci,
 	}
-	return &SignedData{sd: sd, messageDigest: messageDigest}, nil
+	return &SignedData{sd: sd, messageDigest: messageDigest, digestAlgo: hashOID, signAlgo: signOID}, nil
 }
 
 type attributes struct {
@@ -710,7 +717,7 @@ func (sd *SignedData) AddSigner(cert *Certificate, pkey crypto.PrivateKey, confi
 	if err != nil {
 		return err
 	}
-	signature, err := signAttributes(finalAttrs, pkey, crypto.SHA1)
+	signature, err := signAttributes(finalAttrs, pkey, config.HashFunc)
 	if err != nil {
 		return err
 	}
@@ -722,8 +729,8 @@ func (sd *SignedData) AddSigner(cert *Certificate, pkey crypto.PrivateKey, confi
 
 	signer := signerInfo{
 		AuthenticatedAttributes:   finalAttrs,
-		DigestAlgorithm:           pkix.AlgorithmIdentifier{Algorithm: oidDigestAlgorithmSHA1},
-		DigestEncryptionAlgorithm: pkix.AlgorithmIdentifier{Algorithm: oidSignatureSHA1WithRSA},
+		DigestAlgorithm:           pkix.AlgorithmIdentifier{Algorithm: sd.digestAlgo},
+		DigestEncryptionAlgorithm: pkix.AlgorithmIdentifier{Algorithm: sd.signAlgo},
 		IssuerAndSerialNumber:     ias,
 		EncryptedDigest:           signature,
 		Version:                   1,
@@ -770,18 +777,26 @@ func cert2issuerAndSerial(cert *Certificate) (issuerAndSerial, error) {
 }
 
 // signs the DER encoded form of the attributes with the private key
-func signAttributes(attrs []attribute, pkey crypto.PrivateKey, hash crypto.Hash) ([]byte, error) {
+func signAttributes(attrs []attribute, pkey crypto.PrivateKey, hashFunc hash.Hash) ([]byte, error) {
 	attrBytes, err := marshalAttributes(attrs)
 	if err != nil {
 		return nil, err
 	}
-	h := hash.New()
-	h.Write(attrBytes)
-	hashed := h.Sum(nil)
+
+	hashFunc.Write(attrBytes)
+	hashed := hashFunc.Sum(nil)
 	switch priv := pkey.(type) {
 	case *rsa.PrivateKey:
 		return rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA1, hashed)
+	case *sm2.PrivateKey:
+		// 内部包含签名
+		r, s, err := sm2.Sm2Sign(pkey.(*sm2.PrivateKey), hashed, attrBytes, rand.Reader)
+		if err != nil {
+			return nil, err
+		}
+		return sm2.SignDigitToSignData(r, s)
 	}
+
 	return nil, ErrPKCS7UnsupportedAlgorithm
 }
 
