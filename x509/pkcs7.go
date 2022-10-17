@@ -46,9 +46,12 @@ var ErrUnsupportedContentType = errors.New("pkcs7: cannot parse data: unimplemen
 type unsignedData []byte
 
 var (
-	oidData                   = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 1}
-	oidSignedData             = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 2}
-	oidSMSignedData           = asn1.ObjectIdentifier{1, 2, 156, 10197, 6, 1, 4, 2, 2}
+	oidData       = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 1}
+	oidSignedData = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 2}
+
+	oidSMData       = asn1.ObjectIdentifier{1, 2, 156, 10197, 6, 1, 4, 2, 1}
+	oidSMSignedData = asn1.ObjectIdentifier{1, 2, 156, 10197, 6, 1, 4, 2, 2}
+
 	oidEnvelopedData          = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 3}
 	oidSignedAndEnvelopedData = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 4}
 	oidDigestedData           = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 5}
@@ -216,7 +219,7 @@ func parseEnvelopedData(data []byte) (*PKCS7, error) {
 // Verify checks the signatures of a PKCS7 object
 // WARNING: Verify does not check signing time or verify certificate chains at
 // this time.
-func (p7 *PKCS7) Verify() (err error) {
+func (p7 *PKCS7) Verify(hashFlag bool) (err error) {
 	if len(p7.Signers) == 0 {
 		return errors.New("pkcs7: Message has no signers")
 	}
@@ -228,13 +231,82 @@ func (p7 *PKCS7) Verify() (err error) {
 	return nil
 }
 
+// for GMT 0029
+func (p7 *PKCS7) VerifyWithDigest(inData []byte, hashFlag bool) error {
+	if len(p7.Signers) == 0 {
+		return errors.New("pkcs7: Message has no signers")
+	}
+	for _, signer := range p7.Signers {
+		if err := verifySignatureWithDigest(p7, inData, hashFlag, signer); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func verifySignatureWithDigest(p7 *PKCS7, inData []byte, hashFlag bool, signer signerInfo) error {
+	var (
+		expectDigest []byte
+		signedData   = p7.Content
+	)
+
+	hash, err := getHashForOID(signer.DigestAlgorithm.Algorithm)
+	if err != nil {
+		fmt.Printf("invalid hash: %s\n", signer.DigestAlgorithm.Algorithm.String())
+		return err
+	}
+
+	if hashFlag {
+		h := hash.New()
+		h.Write(inData)
+		expectDigest = h.Sum(nil)
+	} else {
+		expectDigest = inData
+	}
+
+	if len(signer.AuthenticatedAttributes) > 0 {
+		var digest []byte
+		err := unmarshalAttribute(signer.AuthenticatedAttributes, oidAttributeMessageDigest, &digest)
+		if err != nil {
+			return err
+		}
+
+		if !hmac.Equal(digest, expectDigest) {
+			return &MessageDigestMismatchError{
+				ExpectedDigest: digest,
+				ActualDigest:   expectDigest,
+			}
+		}
+		// TODO(shengzhi): Optionally verify certificate chain
+		// TODO(shengzhi): Optionally verify signingTime against certificate NotAfter/NotBefore
+		signedData, err = marshalAttributes(signer.AuthenticatedAttributes)
+		if err != nil {
+			return err
+		}
+	} else {
+		signedData = inData
+	}
+
+	cert := getCertFromCertsByIssuerAndSerial(p7.Certificates, signer.IssuerAndSerialNumber)
+	if cert == nil {
+		return errors.New("pkcs7: No certificate for signer")
+	}
+
+	algo := getSignatureAlgorithmByHash(hash, signer.DigestEncryptionAlgorithm.Algorithm)
+	if algo == UnknownSignatureAlgorithm {
+		fmt.Printf("unknown digest encrypt algo: %s\n", signer.DigestEncryptionAlgorithm.Algorithm.String())
+		return ErrPKCS7UnsupportedAlgorithm
+	}
+	return cert.CheckSignature(algo, signedData, signer.EncryptedDigest)
+}
+
 func verifySignature(p7 *PKCS7, signer signerInfo) error {
 	signedData := p7.Content
 	hash, err := getHashForOID(signer.DigestAlgorithm.Algorithm)
 	if err != nil {
 		return err
 	}
-	// fmt.Println("===== hash algo=====:", hash)
+
 	if len(signer.AuthenticatedAttributes) > 0 {
 		var digest []byte
 		err := unmarshalAttribute(signer.AuthenticatedAttributes, oidAttributeMessageDigest, &digest)
@@ -273,7 +345,7 @@ func getSignatureAlgorithmByHash(hash Hash, oid asn1.ObjectIdentifier) Signature
 	switch hash {
 	case SM3:
 		switch {
-		case oid.Equal(oidSM3withSM2):
+		case oid.Equal(oidDSASM2):
 			return SM2WithSM3
 		}
 	case SHA256:
@@ -322,8 +394,7 @@ func getHashForOID(oid asn1.ObjectIdentifier) (Hash, error) {
 		return SHA1, nil
 	case oid.Equal(oidSHA256):
 		return SHA256, nil
-	case oid.Equal(oidSM3):
-	case oid.Equal(oidHashSM3):
+	case oid.Equal(oidSM3), oid.Equal(oidHashSM3):
 		return SM3, nil
 	}
 	return Hash(0), ErrPKCS7UnsupportedAlgorithm
@@ -580,6 +651,7 @@ type Attribute struct {
 type SignerInfoConfig struct {
 	ExtraSignedAttributes []Attribute
 	HashFunc              hash.Hash
+	OriginData            []byte
 }
 
 type DigestOpts struct {
@@ -593,7 +665,7 @@ func NewSignedData(data []byte, opts *DigestOpts) (*SignedData, error) {
 		messageDigest []byte
 
 		hashOID  = oidHashSM3
-		signOID  = oidSignatureSM2WithSM3
+		signOID  = oidSM2_1
 		hashFunc = sm3.New()
 	)
 
@@ -625,11 +697,14 @@ func NewSignedData(data []byte, opts *DigestOpts) (*SignedData, error) {
 		return nil, err
 	}
 
-	ci := contentInfo{ContentType: oidData}
+	ci := contentInfo{ContentType: oidSMData}
 	ci.Content = asn1.RawValue{Class: 2, Tag: 0, Bytes: content, IsCompound: true}
 
 	digAlg := pkix.AlgorithmIdentifier{
 		Algorithm: hashOID,
+		Parameters: asn1.RawValue{
+			Tag: 5,
+		},
 	}
 
 	sd := signedData{
@@ -706,21 +781,7 @@ func (attrs *attributes) ForMarshaling() ([]attribute, error) {
 
 // AddSigner signs attributes about the content and adds certificate to payload
 func (sd *SignedData) AddSigner(cert *Certificate, pkey crypto.PrivateKey, config SignerInfoConfig) error {
-	attrs := &attributes{}
-	attrs.Add(oidAttributeContentType, sd.sd.ContentInfo.ContentType)
-	attrs.Add(oidAttributeMessageDigest, sd.messageDigest)
-	attrs.Add(oidAttributeSigningTime, time.Now())
-	for _, attr := range config.ExtraSignedAttributes {
-		attrs.Add(attr.Type, attr.Value)
-	}
-	finalAttrs, err := attrs.ForMarshaling()
-	if err != nil {
-		return err
-	}
-	signature, err := signAttributes(finalAttrs, pkey, config.HashFunc)
-	if err != nil {
-		return err
-	}
+	var signature []byte
 
 	ias, err := cert2issuerAndSerial(cert)
 	if err != nil {
@@ -728,13 +789,38 @@ func (sd *SignedData) AddSigner(cert *Certificate, pkey crypto.PrivateKey, confi
 	}
 
 	signer := signerInfo{
-		AuthenticatedAttributes:   finalAttrs,
-		DigestAlgorithm:           pkix.AlgorithmIdentifier{Algorithm: sd.digestAlgo},
-		DigestEncryptionAlgorithm: pkix.AlgorithmIdentifier{Algorithm: sd.signAlgo},
-		IssuerAndSerialNumber:     ias,
-		EncryptedDigest:           signature,
 		Version:                   1,
+		IssuerAndSerialNumber:     ias,
+		DigestAlgorithm:           pkix.AlgorithmIdentifier{Algorithm: sd.digestAlgo, Parameters: asn1.RawValue{Tag: 5}},
+		DigestEncryptionAlgorithm: pkix.AlgorithmIdentifier{Algorithm: sd.signAlgo, Parameters: asn1.RawValue{Tag: 5}},
 	}
+
+	if config.OriginData != nil {
+		signature, err = signSMData(config.OriginData, pkey, config.HashFunc)
+		if err != nil {
+			return err
+		}
+	} else {
+		attrs := &attributes{}
+		attrs.Add(oidAttributeContentType, sd.sd.ContentInfo.ContentType)
+		attrs.Add(oidAttributeMessageDigest, sd.messageDigest)
+		attrs.Add(oidAttributeSigningTime, time.Now())
+		for _, attr := range config.ExtraSignedAttributes {
+			attrs.Add(attr.Type, attr.Value)
+		}
+		finalAttrs, err := attrs.ForMarshaling()
+		if err != nil {
+			return err
+		}
+		signature, err = signAttributes(finalAttrs, pkey, config.HashFunc)
+		if err != nil {
+			return err
+		}
+
+		signer.AuthenticatedAttributes = finalAttrs
+	}
+	signer.EncryptedDigest = signature
+
 	// create signature of signed attributes
 	sd.certs = append(sd.certs, cert)
 	sd.sd.SignerInfos = append(sd.sd.SignerInfos, signer)
@@ -749,7 +835,7 @@ func (sd *SignedData) AddCertificate(cert *Certificate) {
 // Detach removes content from the signed data struct to make it a detached signature.
 // This must be called right before Finish()
 func (sd *SignedData) Detach() {
-	sd.sd.ContentInfo = contentInfo{ContentType: oidData}
+	sd.sd.ContentInfo = contentInfo{ContentType: oidSMData}
 }
 
 // Finish marshals the content and its signers
@@ -760,7 +846,7 @@ func (sd *SignedData) Finish() ([]byte, error) {
 		return nil, err
 	}
 	outer := contentInfo{
-		ContentType: oidSignedData,
+		ContentType: oidSMSignedData,
 		Content:     asn1.RawValue{Class: 2, Tag: 0, Bytes: inner, IsCompound: true},
 	}
 	return asn1.Marshal(outer)
@@ -776,6 +862,37 @@ func cert2issuerAndSerial(cert *Certificate) (issuerAndSerial, error) {
 	return ias, nil
 }
 
+func signSMData(data []byte, pkey crypto.PrivateKey, hashFunc hash.Hash) ([]byte, error) {
+	switch priv := pkey.(type) {
+	case *rsa.PrivateKey:
+		hashFunc.Write(data)
+		hashed := hashFunc.Sum(nil)
+		return rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA1, hashed)
+	case *sm2.PrivateKey:
+		// test
+		// sm2Priv, _ := sm2.GenerateKey(rand.Reader)
+		// sig, err := sm2Priv.Sign(rand.Reader, attrBytes, nil)
+		// if err != nil {
+		// 	return nil, err
+		// }
+		// fmt.Printf("x1: %d, %x", len(sm2Priv.PublicKey.X.Bytes()), sm2Priv.PublicKey.X.Bytes())
+		// fmt.Printf("y1: %d, %x", len(sm2Priv.PublicKey.Y.Bytes()), sm2Priv.PublicKey.Y.Bytes())
+		// fmt.Printf("D1: %d, %x", len(sm2Priv.D.Bytes()), sm2Priv.D.Bytes())
+		// fmt.Printf("sig: %x\n", sig)
+		// fmt.Printf("verify: %v\n", sm2Priv.PublicKey.Verify(attrBytes, sig))
+
+		// 内部包含签名
+		sm2Priv := pkey.(*sm2.PrivateKey)
+		sig, err := sm2Priv.Sign(rand.Reader, data, nil)
+		if err != nil {
+			return nil, err
+		}
+		return sig, nil
+	}
+
+	return nil, ErrPKCS7UnsupportedAlgorithm
+}
+
 // signs the DER encoded form of the attributes with the private key
 func signAttributes(attrs []attribute, pkey crypto.PrivateKey, hashFunc hash.Hash) ([]byte, error) {
 	attrBytes, err := marshalAttributes(attrs)
@@ -789,12 +906,30 @@ func signAttributes(attrs []attribute, pkey crypto.PrivateKey, hashFunc hash.Has
 	case *rsa.PrivateKey:
 		return rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA1, hashed)
 	case *sm2.PrivateKey:
+		// test
+		// sm2Priv, _ := sm2.GenerateKey(rand.Reader)
+		// sig, err := sm2Priv.Sign(rand.Reader, attrBytes, nil)
+		// if err != nil {
+		// 	return nil, err
+		// }
+		// fmt.Printf("x1: %d, %x", len(sm2Priv.PublicKey.X.Bytes()), sm2Priv.PublicKey.X.Bytes())
+		// fmt.Printf("y1: %d, %x", len(sm2Priv.PublicKey.Y.Bytes()), sm2Priv.PublicKey.Y.Bytes())
+		// fmt.Printf("D1: %d, %x", len(sm2Priv.D.Bytes()), sm2Priv.D.Bytes())
+		// fmt.Printf("sig: %x\n", sig)
+		// fmt.Printf("verify: %v\n", sm2Priv.PublicKey.Verify(attrBytes, sig))
+
 		// 内部包含签名
-		r, s, err := sm2.Sm2Sign(pkey.(*sm2.PrivateKey), hashed, attrBytes, rand.Reader)
+		sm2Priv := pkey.(*sm2.PrivateKey)
+		sig, err := sm2Priv.Sign(rand.Reader, attrBytes, nil)
 		if err != nil {
 			return nil, err
 		}
-		return sm2.SignDigitToSignData(r, s)
+		// fmt.Printf("x1: %d, %x", len(sm2Priv.PublicKey.X.Bytes()), sm2Priv.PublicKey.X.Bytes())
+		// fmt.Printf("y1: %d, %x", len(sm2Priv.PublicKey.Y.Bytes()), sm2Priv.PublicKey.Y.Bytes())
+		// fmt.Printf("D1: %d, %x", len(sm2Priv.D.Bytes()), sm2Priv.D.Bytes())
+		// fmt.Printf("sig: %x\n", sig)
+		// fmt.Printf("verify: %v\n", sm2Priv.PublicKey.Verify(attrBytes, sig))
+		return sig, nil
 	}
 
 	return nil, ErrPKCS7UnsupportedAlgorithm

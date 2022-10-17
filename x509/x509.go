@@ -437,6 +437,7 @@ var (
 	oidSignatureSM2WithSHA256   = asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 503}
 	//	oidSignatureSM3WithRSA      = asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 504}
 
+	oidSM2_1   = asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 301, 1}
 	oidSM3     = asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 401, 1}
 	oidSHA256  = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 1}
 	oidSHA384  = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 2}
@@ -1029,6 +1030,14 @@ func checkSignature(algo SignatureAlgorithm, signed, signature []byte, publicKey
 				X:     pub.X,
 				Y:     pub.Y,
 			}
+
+			// fmt.Printf("pubX: %x\n", sm2pub.X.Bytes())
+			// fmt.Printf("pubY: %x\n", sm2pub.Y.Bytes())
+			// fmt.Printf("hashed: %x\n", signed)
+			// fmt.Printf("sig: %x\n", signature)
+			// fmt.Printf("r: %x\n", ecdsaSig.R.Bytes())
+			// fmt.Printf("s: %x\n", ecdsaSig.S.Bytes())
+
 			if !sm2.Sm2Verify(sm2pub, signed, nil, ecdsaSig.R, ecdsaSig.S) {
 				return errors.New("x509: SM2 verification failure")
 			}
