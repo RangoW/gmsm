@@ -1038,9 +1038,15 @@ func checkSignature(algo SignatureAlgorithm, signed, signature []byte, publicKey
 			// fmt.Printf("r: %x\n", ecdsaSig.R.Bytes())
 			// fmt.Printf("s: %x\n", ecdsaSig.S.Bytes())
 
-			if !sm2.Sm2Verify(sm2pub, signed, nil, ecdsaSig.R, ecdsaSig.S) {
+			// Notes: signed 为摘要数据, 故外层需进行摘要计算。
+			if !sm2.Verify(sm2pub, signed, ecdsaSig.R, ecdsaSig.S) {
 				return errors.New("x509: SM2 verification failure")
 			}
+
+			// 传入原始数据进行验证
+			// if !sm2.Sm2Verify(sm2pub, signed, nil ecdsaSig.R, ecdsaSig.S) {
+			// 	return errors.New("x509: SM2 verification failure")
+			// }
 		default:
 			if !ecdsa.Verify(pub, fnHash(), ecdsaSig.R, ecdsaSig.S) {
 				return errors.New("x509: ECDSA verification failure")

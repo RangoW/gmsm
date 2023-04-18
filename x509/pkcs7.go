@@ -250,21 +250,21 @@ func verifySignatureWithDigest(p7 *PKCS7, inData []byte, hashFlag bool, signer s
 		signedData   = p7.Content
 	)
 
+	// 摘要算法
 	hash, err := getHashForOID(signer.DigestAlgorithm.Algorithm)
 	if err != nil {
 		fmt.Printf("invalid hash: %s\n", signer.DigestAlgorithm.Algorithm.String())
 		return err
 	}
 
-	if hashFlag {
+	if !hashFlag {
 		h := hash.New()
 		h.Write(inData)
 		expectDigest = h.Sum(nil)
-	} else {
-		expectDigest = inData
 	}
 
 	if len(signer.AuthenticatedAttributes) > 0 {
+		// 校验数字信封中的可校验属性
 		var digest []byte
 		err := unmarshalAttribute(signer.AuthenticatedAttributes, oidAttributeMessageDigest, &digest)
 		if err != nil {
@@ -283,13 +283,42 @@ func verifySignatureWithDigest(p7 *PKCS7, inData []byte, hashFlag bool, signer s
 		if err != nil {
 			return err
 		}
-	} else {
-		signedData = inData
+
+		if !hashFlag {
+			// 以可鉴别属性的摘要进行签名值验证
+			inData = signedData
+		}
 	}
 
+	// 校验数字信封中的签名值。
 	cert := getCertFromCertsByIssuerAndSerial(p7.Certificates, signer.IssuerAndSerialNumber)
 	if cert == nil {
 		return errors.New("pkcs7: No certificate for signer")
+	}
+
+	if !hashFlag {
+		switch hash {
+		case SM3:
+			pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+			if !ok {
+				return errors.New("pkcs7: the format of signture is unknown")
+			}
+			sm2Pub := &sm2.PublicKey{
+				Curve: sm2.P256Sm2(),
+				X:     pub.X,
+				Y:     pub.Y,
+			}
+			expectDigest, err = sm2Pub.Sm3Digest(inData, nil)
+			if err != nil {
+				return fmt.Errorf("pkcs7: calculate sm3 digest failed, %v", err)
+			}
+		default:
+			h := hash.New()
+			h.Write(inData)
+			expectDigest = h.Sum(nil)
+		}
+	} else {
+		expectDigest = inData
 	}
 
 	algo := getSignatureAlgorithmByHash(hash, signer.DigestEncryptionAlgorithm.Algorithm)
@@ -297,7 +326,7 @@ func verifySignatureWithDigest(p7 *PKCS7, inData []byte, hashFlag bool, signer s
 		fmt.Printf("unknown digest encrypt algo: %s\n", signer.DigestEncryptionAlgorithm.Algorithm.String())
 		return ErrPKCS7UnsupportedAlgorithm
 	}
-	return cert.CheckSignature(algo, signedData, signer.EncryptedDigest)
+	return cert.CheckSignature(algo, expectDigest, signer.EncryptedDigest)
 }
 
 func verifySignature(p7 *PKCS7, signer signerInfo) error {
