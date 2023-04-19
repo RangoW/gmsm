@@ -809,7 +809,7 @@ func (attrs *attributes) ForMarshaling() ([]attribute, error) {
 }
 
 // AddSigner signs attributes about the content and adds certificate to payload
-func (sd *SignedData) AddSigner(cert *Certificate, pkey crypto.PrivateKey, config SignerInfoConfig) error {
+func (sd *SignedData) AddSigner(cert *Certificate, pkey crypto.Signer, config SignerInfoConfig) error {
 	var signature []byte
 
 	ias, err := cert2issuerAndSerial(cert)
@@ -891,13 +891,13 @@ func cert2issuerAndSerial(cert *Certificate) (issuerAndSerial, error) {
 	return ias, nil
 }
 
-func signSMData(data []byte, pkey crypto.PrivateKey, hashFunc hash.Hash) ([]byte, error) {
+func signSMData(data []byte, pkey crypto.Signer, hashFunc hash.Hash) ([]byte, error) {
 	switch priv := pkey.(type) {
 	case *rsa.PrivateKey:
 		hashFunc.Write(data)
 		hashed := hashFunc.Sum(nil)
 		return rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA1, hashed)
-	case *sm2.PrivateKey:
+	default:
 		// test
 		// sm2Priv, _ := sm2.GenerateKey(rand.Reader)
 		// sig, err := sm2Priv.Sign(rand.Reader, attrBytes, nil)
@@ -911,8 +911,8 @@ func signSMData(data []byte, pkey crypto.PrivateKey, hashFunc hash.Hash) ([]byte
 		// fmt.Printf("verify: %v\n", sm2Priv.PublicKey.Verify(attrBytes, sig))
 
 		// 内部包含签名
-		sm2Priv := pkey.(*sm2.PrivateKey)
-		sig, err := sm2Priv.Sign(rand.Reader, data, nil)
+		// sm2Priv := pkey.(*sm2.PrivateKey)
+		sig, err := pkey.Sign(rand.Reader, data, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -923,7 +923,7 @@ func signSMData(data []byte, pkey crypto.PrivateKey, hashFunc hash.Hash) ([]byte
 }
 
 // signs the DER encoded form of the attributes with the private key
-func signAttributes(attrs []attribute, pkey crypto.PrivateKey, hashFunc hash.Hash) ([]byte, error) {
+func signAttributes(attrs []attribute, pkey crypto.Signer, hashFunc hash.Hash) ([]byte, error) {
 	attrBytes, err := marshalAttributes(attrs)
 	if err != nil {
 		return nil, err
@@ -934,7 +934,7 @@ func signAttributes(attrs []attribute, pkey crypto.PrivateKey, hashFunc hash.Has
 	switch priv := pkey.(type) {
 	case *rsa.PrivateKey:
 		return rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA1, hashed)
-	case *sm2.PrivateKey:
+	default:
 		// test
 		// sm2Priv, _ := sm2.GenerateKey(rand.Reader)
 		// sig, err := sm2Priv.Sign(rand.Reader, attrBytes, nil)
@@ -948,8 +948,8 @@ func signAttributes(attrs []attribute, pkey crypto.PrivateKey, hashFunc hash.Has
 		// fmt.Printf("verify: %v\n", sm2Priv.PublicKey.Verify(attrBytes, sig))
 
 		// 内部包含签名
-		sm2Priv := pkey.(*sm2.PrivateKey)
-		sig, err := sm2Priv.Sign(rand.Reader, attrBytes, nil)
+		// sm2Priv := pkey.(*sm2.PrivateKey)
+		sig, err := pkey.Sign(rand.Reader, attrBytes, nil)
 		if err != nil {
 			return nil, err
 		}
