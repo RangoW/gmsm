@@ -244,6 +244,86 @@ func (p7 *PKCS7) VerifyWithDigest(inData []byte, hashFlag bool) error {
 	return nil
 }
 
+func GetCertAndSig(p7 *PKCS7, inData []byte, hashFlag bool, signer signerInfo) (*Certificate, []byte, []byte, error) {
+	var (
+		expectDigest []byte
+		signedData   = p7.Content
+	)
+
+	// 摘要算法
+	hash, err := getHashForOID(signer.DigestAlgorithm.Algorithm)
+	if err != nil {
+		fmt.Printf("invalid hash: %s\n", signer.DigestAlgorithm.Algorithm.String())
+		return nil, nil, nil, err
+	}
+
+	if !hashFlag {
+		h := hash.New()
+		h.Write(inData)
+		expectDigest = h.Sum(nil)
+	}
+
+	if len(signer.AuthenticatedAttributes) > 0 {
+		// 校验数字信封中的可校验属性
+		var digest []byte
+		err := unmarshalAttribute(signer.AuthenticatedAttributes, oidAttributeMessageDigest, &digest)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
+		if !hmac.Equal(digest, expectDigest) {
+			return nil, nil, nil, &MessageDigestMismatchError{
+				ExpectedDigest: digest,
+				ActualDigest:   expectDigest,
+			}
+		}
+		// TODO(shengzhi): Optionally verify certificate chain
+		// TODO(shengzhi): Optionally verify signingTime against certificate NotAfter/NotBefore
+		signedData, err = marshalAttributes(signer.AuthenticatedAttributes)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
+		if !hashFlag {
+			// 以可鉴别属性的摘要进行签名值验证
+			inData = signedData
+		}
+	}
+
+	// 校验数字信封中的签名值。
+	cert := getCertFromCertsByIssuerAndSerial(p7.Certificates, signer.IssuerAndSerialNumber)
+	if cert == nil {
+		return nil, nil, nil, errors.New("pkcs7: No certificate for signer")
+	}
+
+	if !hashFlag {
+		switch hash {
+		case SM3:
+			pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+			if !ok {
+				return nil, nil, nil, errors.New("pkcs7: the format of signture is unknown")
+			}
+			sm2Pub := &sm2.PublicKey{
+				Curve: sm2.P256Sm2(),
+				X:     pub.X,
+				Y:     pub.Y,
+			}
+			expectDigest, err = sm2Pub.Sm3Digest(inData, nil)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("pkcs7: calculate sm3 digest failed, %v", err)
+			}
+		default:
+			h := hash.New()
+			h.Write(inData)
+			expectDigest = h.Sum(nil)
+		}
+	} else {
+		expectDigest = inData
+	}
+
+	return cert, expectDigest, signer.EncryptedDigest, nil
+}
+
 func verifySignatureWithDigest(p7 *PKCS7, inData []byte, hashFlag bool, signer signerInfo) error {
 	var (
 		expectDigest []byte
@@ -326,6 +406,8 @@ func verifySignatureWithDigest(p7 *PKCS7, inData []byte, hashFlag bool, signer s
 		fmt.Printf("unknown digest encrypt algo: %s\n", signer.DigestEncryptionAlgorithm.Algorithm.String())
 		return ErrPKCS7UnsupportedAlgorithm
 	}
+
+	// soft
 	return cert.CheckSignature(algo, expectDigest, signer.EncryptedDigest)
 }
 
